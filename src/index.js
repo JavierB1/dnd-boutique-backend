@@ -2,129 +2,118 @@ require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const { enviarMensaje, marcarLeido } = require("./whatsapp");
-const { procesarMensaje, limpiarHistorial } = require("./chatbot");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Números en modo "humano" (bot desactivado temporalmente)
 const modoHumano = new Set();
+const conversaciones = {};
 
 app.use(cors());
 app.use(express.json());
 
-// ─── HEALTH CHECK ─────────────────────────────────────────────
+const ahora = () => new Date().toLocaleTimeString("es-SV", { hour: "2-digit", minute: "2-digit" });
+
+const guardarMensaje = (telefono, from, texto, nombre = "") => {
+  if (!conversaciones[telefono]) {
+    conversaciones[telefono] = { nombre: nombre || telefono, mensajes: [] };
+  }
+  if (nombre) conversaciones[telefono].nombre = nombre;
+  conversaciones[telefono].mensajes.push({ id: Date.now().toString(), from, texto, tiempo: ahora() });
+  if (conversaciones[telefono].mensajes.length > 100) {
+    conversaciones[telefono].mensajes = conversaciones[telefono].mensajes.slice(-100);
+  }
+};
+
 app.get("/", (req, res) => {
-  res.json({
-    status: "✅ DND Boutique Backend corriendo",
-    timestamp: new Date().toISOString(),
-  });
+  res.json({ status: "✅ DND Boutique Backend corriendo", timestamp: new Date().toISOString() });
 });
 
-// ─── WEBHOOK VERIFICACIÓN (Meta lo llama 1 vez al configurar) ─
 app.get("/webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
   const challenge = req.query["hub.challenge"];
-
   if (mode === "subscribe" && token === process.env.WHATSAPP_VERIFY_TOKEN) {
     console.log("✅ Webhook verificado por Meta");
     res.status(200).send(challenge);
   } else {
-    console.error("❌ Token de verificación incorrecto");
     res.sendStatus(403);
   }
 });
 
-// ─── WEBHOOK MENSAJES ENTRANTES ────────────────────────────────
 app.post("/webhook", async (req, res) => {
-  // Responder inmediatamente a Meta (evita timeouts)
   res.sendStatus(200);
-
   const body = req.body;
-
   if (body.object !== "whatsapp_business_account") return;
-
   for (const entry of body.entry || []) {
     for (const change of entry.changes || []) {
       const value = change.value;
       if (!value?.messages?.length) continue;
-
       for (const message of value.messages) {
-        // Solo procesamos mensajes de texto por ahora
         if (message.type !== "text") continue;
-
         const telefono = message.from;
         const texto = message.text.body;
-        const messageId = message.id;
-
-        console.log(`📩 Mensaje de ${telefono}: ${texto}`);
-
-        // Marcar como leído
-        await marcarLeido(messageId);
-
-        // Si está en modo humano, no responde el bot
-        if (modoHumano.has(telefono)) {
-          console.log(`👤 ${telefono} en modo humano, bot pausado`);
-          continue;
-        }
-
-        // Detectar si el cliente quiere hablar con persona
-        const quiereHumano = /persona|humano|encargad|dueñ|hablar con/i.test(texto);
-        if (quiereHumano) {
+        const nombre = value.contacts?.[0]?.profile?.name || telefono;
+        console.log(`📩 [WhatsApp] ${nombre} (${telefono}): ${texto}`);
+        guardarMensaje(telefono, "client", texto, nombre);
+        await marcarLeido(message.id);
+        if (modoHumano.has(telefono)) continue;
+        if (/persona|humano|encargad|dueñ|hablar con/i.test(texto)) {
           modoHumano.add(telefono);
-          await enviarMensaje(
-            telefono,
-            "Claro, en un momento te atiende nuestra encargada 🙏 Por favor espera unos minutos."
-          );
-          console.log(`🔔 ALERTA: ${telefono} solicita atención humana`);
-          continue;
+          const msg = "Claro, en un momento te atiende nuestra encargada 🙏 Por favor espera unos minutos.";
+          guardarMensaje(telefono, "bot", msg);
+          await enviarMensaje(telefono, msg);
         }
-
-        // Procesar con IA y responder
-        const respuesta = await procesarMensaje(telefono, texto);
-        await enviarMensaje(telefono, respuesta);
       }
     }
   }
 });
 
-// ─── API PARA EL CRM ───────────────────────────────────────────
-
-// Enviar mensaje manual desde el CRM
-app.post("/api/enviar", async (req, res) => {
-  const { telefono, mensaje } = req.body;
-  if (!telefono || !mensaje) {
-    return res.status(400).json({ error: "Faltan campos: telefono, mensaje" });
-  }
-  await enviarMensaje(telefono, mensaje);
-  res.json({ ok: true, mensaje: "Mensaje enviado" });
+// N8N notifica mensajes entrantes
+app.post("/api/mensaje-entrante", (req, res) => {
+  const { from, nombre, texto } = req.body;
+  if (!from || !texto) return res.status(400).json({ error: "Faltan campos" });
+  guardarMensaje(from, "client", texto, nombre);
+  console.log(`📩 [N8N] ${nombre||from}: ${texto}`);
+  res.json({ ok: true });
 });
 
-// Activar/desactivar bot para un número
+// N8N notifica respuesta del bot
+app.post("/api/mensaje-bot", (req, res) => {
+  const { telefono, texto } = req.body;
+  if (!telefono || !texto) return res.status(400).json({ error: "Faltan campos" });
+  guardarMensaje(telefono, "bot", texto);
+  console.log(`🤖 [Bot] ${telefono}: ${texto}`);
+  res.json({ ok: true });
+});
+
+// CRM obtiene conversaciones
+app.get("/api/conversaciones", (req, res) => {
+  res.json({ conversaciones });
+});
+
+// CRM envía mensaje manual
+app.post("/api/enviar", async (req, res) => {
+  const { telefono, mensaje } = req.body;
+  if (!telefono || !mensaje) return res.status(400).json({ error: "Faltan campos" });
+  await enviarMensaje(telefono, mensaje);
+  guardarMensaje(telefono, "user", mensaje);
+  console.log(`📤 [CRM] ${telefono}: ${mensaje}`);
+  res.json({ ok: true });
+});
+
+// Modo bot/humano
 app.post("/api/modo", (req, res) => {
   const { telefono, humano } = req.body;
   if (!telefono) return res.status(400).json({ error: "Falta telefono" });
-
-  if (humano) {
-    modoHumano.add(telefono);
-    console.log(`👤 Bot DESACTIVADO para ${telefono}`);
-  } else {
-    modoHumano.delete(telefono);
-    limpiarHistorial(telefono);
-    console.log(`🤖 Bot ACTIVADO para ${telefono}`);
-  }
-
+  if (humano) { modoHumano.add(telefono); } else { modoHumano.delete(telefono); }
   res.json({ ok: true, telefono, modo: humano ? "humano" : "bot" });
 });
 
-// Ver qué números están en modo humano
 app.get("/api/modo", (req, res) => {
   res.json({ modoHumano: [...modoHumano] });
 });
 
-// ─── INICIAR SERVIDOR ──────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`🚀 DND Boutique Backend corriendo en puerto ${PORT}`);
-  console.log(`📡 Webhook URL: https://TU-DOMINIO.railway.app/webhook`);
 });
