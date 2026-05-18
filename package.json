@@ -1,23 +1,25 @@
 {
-  "name": "dnd-boutique-backend",
+  "name": "dnd-boutique-crm",
   "version": "1.0.0",
-  "description": "Backend para DND Boutique - WhatsApp CRM con IA",
-  "main": "src/index.js",
-  "scripts": {
-    "start": "node src/index.js",
-    "dev": "nodemon src/index.js"
-  },
+  "private": true,
   "dependencies": {
-    "openai": "^4.47.0",
-    "axios": "^1.6.0",
-    "cors": "^2.8.5",
-    "dotenv": "^16.4.0",
-    "express": "^4.18.0"
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-scripts": "5.0.1",
+    "firebase": "^10.12.0"
   },
-  "devDependencies": {
-    "nodemon": "^3.1.0"
+  "scripts": {
+    "start": "react-scripts start",
+    "build": "react-scripts build"
   },
-  "engines": {
-    "node": ">=18.0.0"
+  "browserslist": {
+    "production": [
+      ">0.2%",
+      "not dead",
+      "not op_mini all"
+    ],
+    "development": [
+      "last 1 chrome version"
+    ]
   }
 }
