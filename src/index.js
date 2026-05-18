@@ -80,6 +80,13 @@ app.post("/webhook", async (req, res) => {
         const telefono = message.from;
         const texto = message.text.body;
         const nombre = value.contacts?.[0]?.profile?.name || telefono;
+        
+        // Ignorar mensajes enviados desde el CRM (evitar duplicados)
+        if (message.from_me || message.from === process.env.WHATSAPP_PHONE_NUMBER_ID) {
+          await marcarLeido(message.id);
+          continue;
+        }
+        
         console.log(`📩 [WhatsApp] ${nombre}: ${texto}`);
         await guardarMensaje(telefono, "client", texto, nombre);
         await marcarLeido(message.id);
