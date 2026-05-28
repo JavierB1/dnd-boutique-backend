@@ -123,19 +123,20 @@ app.post("/api/enviar", async (req, res) => {
   res.json({ ok: true });
 });
 
-// ─── DEBOUNCE: guardar y consultar último mensaje ──────────────
-app.post("/api/ultimo-mensaje", async (req, res) => {
+// ─── DEBOUNCE simplificado ─────────────────────────────────────
+app.post("/api/debounce", async (req, res) => {
   const { telefono, timestamp } = req.body;
   if (!telefono || !timestamp) return res.status(400).json({ error: "Faltan campos" });
   await db.collection("debounce").doc(telefono).set({ timestamp, updatedAt: Date.now() });
-  res.json({ ok: true });
+  res.json({ ok: true, timestamp });
 });
 
-app.get("/api/ultimo-mensaje/:telefono", async (req, res) => {
-  const { telefono } = req.params;
+app.get("/api/debounce/:telefono/:timestamp", async (req, res) => {
+  const { telefono, timestamp } = req.params;
   const doc = await db.collection("debounce").doc(telefono).get();
-  if (!doc.exists) return res.json({ timestamp: null });
-  res.json({ timestamp: doc.data().timestamp });
+  if (!doc.exists) return res.json({ esUltimo: false });
+  const esUltimo = doc.data().timestamp === timestamp;
+  res.json({ esUltimo });
 });
 
 // ─── GET combos activos (para N8N → AI Agent) ─────────────────
