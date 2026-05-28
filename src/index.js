@@ -123,6 +123,24 @@ app.post("/api/enviar", async (req, res) => {
   res.json({ ok: true });
 });
 
+// ─── GET combos activos (para N8N → AI Agent) ─────────────────
+app.get("/api/combos", async (req, res) => {
+  try {
+    const snapshot = await db.collection("combos").where("activo", "==", true).get();
+    if (snapshot.empty) {
+      // Fallback al catálogo estático si Firebase está vacío
+      const { getCombosActivos } = require("./catalogo");
+      return res.json({ combos: getCombosActivos() });
+    }
+    const combos = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    res.json({ combos });
+  } catch (error) {
+    console.error("❌ Error obteniendo combos:", error.message);
+    const { getCombosActivos } = require("./catalogo");
+    res.json({ combos: getCombosActivos() });
+  }
+});
+
 // ─── Modo bot/humano ──────────────────────────────────────────
 app.post("/api/modo", async (req, res) => {
   const { telefono, humano } = req.body;
