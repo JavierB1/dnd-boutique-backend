@@ -37,8 +37,6 @@ const guardarMensaje = async (telefono, from, texto, nombre="") => {
       ultimoMsg: texto,
       ultimoTiempo: ahora(),
       botActivo: data.botActivo !== undefined ? data.botActivo : true,
-      // sinLeer solo sube si es mensaje del cliente Y el bot está en modo humano
-      // (el humano necesita verlo), o si es cliente normal
       sinLeer: from === "client" ? (data.sinLeer || 0) + 1 : (data.sinLeer || 0),
     }, { merge: true });
   } catch (e) {
@@ -74,7 +72,6 @@ app.post("/webhook", async (req, res) => {
           continue;
         }
         console.log(`📩 [WhatsApp] ${nombre}: ${texto}`);
-        // Siempre guarda el mensaje, independientemente del modo bot
         await guardarMensaje(telefono, "client", texto, nombre);
         await marcarLeido(message.id);
       }
@@ -103,30 +100,32 @@ app.post("/api/mensaje-bot", async (req, res) => {
 // ─── CRM: enviar mensaje manual ───────────────────────────────
 app.post("/api/enviar", async (req, res) => {
   const { telefono, mensaje } = req.body;
-  if (!telefono || !mensaje) return res.status(400).json({ error:"Faltan campos" });
+  if (!telefono || !mensaje) {
+    console.error("❌ [CRM] Intento de envío fallido: Faltan campos", { telefono, mensaje });
+    return res.status(400).json({ error: "Faltan campos" });
+  }
   try {
-    await enviarMensaje(telefono, mensaje);
-    // NO guardar aquí — el webhook de Meta lo guardará, o ya lo hizo el CRM
-    // Solo guardamos con flag para evitar duplicado
+    console.log(`📤 [CRM] Iniciando envío manual a ${telefono}...`);
+    const respuestaMeta = await enviarMensaje(telefono, mensaje);
     await guardarMensaje(telefono, "user", mensaje);
-    console.log(`📤 [CRM] ${telefono}: ${mensaje}`);
-    res.json({ ok:true });
+    console.log(`✅ [CRM] Mensaje enviado correctamente a ${telefono}.`);
+    res.json({ ok: true, metaResponse: respuestaMeta });
   } catch(e) {
-    res.status(500).json({ error:e.message });
+    console.error("❌ [CRM] Error fatal en enviarMensaje:", e.message);
+    res.status(500).json({ error: e.message });
   }
 });
 
 // ─── N8N: verificar si bot está activo ────────────────────────
-// N8N llama esto ANTES de procesar con IA
 app.get("/api/bot-activo/:telefono", async (req, res) => {
   const { telefono } = req.params;
   try {
     const snap = await db.collection("conversaciones").doc(telefono).get();
-    if (!snap.exists) return res.json({ botActivo:true }); // nuevo cliente = bot activo
-    const botActivo = snap.data().botActivo !== false; // default true
+    if (!snap.exists) return res.json({ botActivo:true });
+    const botActivo = snap.data().botActivo !== false;
     res.json({ botActivo });
   } catch(e) {
-    res.json({ botActivo:true }); // en caso de error, dejar pasar
+    res.json({ botActivo:true });
   }
 });
 
