@@ -109,7 +109,8 @@ app.post("/api/enviar", async (req, res) => {
     const respuestaMeta = await enviarMensaje(telefono, mensaje);
     await guardarMensaje(telefono, "user", mensaje);
     console.log(`✅ [CRM] Mensaje enviado correctamente a ${telefono}.`);
-    res.json({ ok: true, metaResponse: respuestaMeta });
+    // Enviamos "isManual: true" para que n8n pueda filtrar esta respuesta y no intentar procesar metadatos inexistentes
+    res.json({ ok: true, metaResponse: respuestaMeta, isManual: true });
   } catch(e) {
     console.error("❌ [CRM] Error fatal en enviarMensaje:", e.message);
     res.status(500).json({ error: e.message });
