@@ -3,12 +3,11 @@ const express = require("express");
 const cors = require("cors");
 const { enviarMensaje, marcarLeido } = require("./whatsapp");
 const { initializeApp, cert } = require("firebase-admin/app");
-const { getFirestore, FieldValue } = require("firebase-admin/firestore");
+const { getFirestore } = require("firebase-admin/firestore");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ─── FIREBASE ADMIN ───────────────────────────────────────────
 const firebaseApp = initializeApp({
   credential: cert({
     projectId: process.env.FIREBASE_PROJECT_ID,
@@ -21,50 +20,40 @@ const db = getFirestore(firebaseApp);
 app.use(cors());
 app.use(express.json());
 
-const ahora = () => new Date().toLocaleTimeString("es-SV", { hour: "2-digit", minute: "2-digit" });
+const ahora = () => new Date().toLocaleTimeString("es-SV", { hour:"2-digit", minute:"2-digit" });
 
-// ─── GUARDAR MENSAJE EN FIREBASE ──────────────────────────────
-const guardarMensaje = async (telefono, from, texto, nombre = "") => {
+// ─── GUARDAR MENSAJE ──────────────────────────────────────────
+const guardarMensaje = async (telefono, from, texto, nombre="") => {
   try {
     const ref = db.collection("conversaciones").doc(telefono);
-    const doc = await ref.get();
-    const mensajes = doc.exists ? (doc.data().mensajes || []) : [];
-    
-    const nuevoMensaje = { from, texto, tiempo: ahora() };
-    mensajes.push(nuevoMensaje);
-    
-    // Limitar a 100 mensajes
+    const snap = await ref.get();
+    const data = snap.exists ? snap.data() : {};
+    const mensajes = data.mensajes || [];
+    mensajes.push({ from, texto, tiempo: ahora() });
     const mensajesLimitados = mensajes.slice(-100);
-    
     await ref.set({
-      nombre: nombre || (doc.exists ? doc.data().nombre : telefono) || telefono,
+      nombre: nombre || data.nombre || telefono,
       mensajes: mensajesLimitados,
       ultimoMsg: texto,
       ultimoTiempo: ahora(),
-      botActivo: doc.exists ? (doc.data().botActivo !== undefined ? doc.data().botActivo : true) : true,
-      sinLeer: from === "client" ? (doc.exists ? (doc.data().sinLeer || 0) + 1 : 1) : 0,
+      botActivo: data.botActivo !== undefined ? data.botActivo : true,
+      // sinLeer solo sube si es mensaje del cliente Y el bot está en modo humano
+      // (el humano necesita verlo), o si es cliente normal
+      sinLeer: from === "client" ? (data.sinLeer || 0) + 1 : (data.sinLeer || 0),
     }, { merge: true });
-  } catch (error) {
-    console.error("❌ Error guardando en Firebase:", error.message);
+  } catch (e) {
+    console.error("❌ Error guardando:", e.message);
   }
 };
 
-// ─── HEALTH CHECK ─────────────────────────────────────────────
-app.get("/", (req, res) => {
-  res.json({ status: "✅ DND Boutique Backend corriendo", timestamp: new Date().toISOString() });
-});
+// ─── HEALTH ───────────────────────────────────────────────────
+app.get("/", (req, res) => res.json({ status:"✅ DND Boutique Backend", timestamp:new Date().toISOString() }));
 
 // ─── WEBHOOK META ─────────────────────────────────────────────
 app.get("/webhook", (req, res) => {
-  const mode = req.query["hub.mode"];
-  const token = req.query["hub.verify_token"];
-  const challenge = req.query["hub.challenge"];
-  if (mode === "subscribe" && token === process.env.WHATSAPP_VERIFY_TOKEN) {
-    console.log("✅ Webhook verificado por Meta");
-    res.status(200).send(challenge);
-  } else {
-    res.sendStatus(403);
-  }
+  const { "hub.mode":mode, "hub.verify_token":token, "hub.challenge":challenge } = req.query;
+  if (mode==="subscribe" && token===process.env.WHATSAPP_VERIFY_TOKEN) res.status(200).send(challenge);
+  else res.sendStatus(403);
 });
 
 app.post("/webhook", async (req, res) => {
@@ -80,14 +69,12 @@ app.post("/webhook", async (req, res) => {
         const telefono = message.from;
         const texto = message.text.body;
         const nombre = value.contacts?.[0]?.profile?.name || telefono;
-        
-        // Ignorar mensajes enviados desde el CRM (evitar duplicados)
         if (message.from_me || message.from === process.env.WHATSAPP_PHONE_NUMBER_ID) {
           await marcarLeido(message.id);
           continue;
         }
-        
         console.log(`📩 [WhatsApp] ${nombre}: ${texto}`);
+        // Siempre guarda el mensaje, independientemente del modo bot
         await guardarMensaje(telefono, "client", texto, nombre);
         await marcarLeido(message.id);
       }
@@ -95,76 +82,90 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-// ─── N8N notifica mensaje entrante ────────────────────────────
+// ─── N8N: guardar mensaje entrante ────────────────────────────
 app.post("/api/mensaje-entrante", async (req, res) => {
   const { from, nombre, texto } = req.body;
-  if (!from || !texto) return res.status(400).json({ error: "Faltan campos" });
-  await guardarMensaje(from, "client", texto, nombre);
+  if (!from || !texto) return res.status(400).json({ error:"Faltan campos" });
+  await guardarMensaje(from, "client", texto.replace(/\n/g," ").replace(/\r/g," "), nombre);
   console.log(`📩 [N8N] ${nombre||from}: ${texto}`);
-  res.json({ ok: true });
+  res.json({ ok:true });
 });
 
-// ─── N8N notifica respuesta del bot ───────────────────────────
+// ─── N8N: respuesta del bot ───────────────────────────────────
 app.post("/api/mensaje-bot", async (req, res) => {
   const { telefono, texto } = req.body;
-  if (!telefono || !texto) return res.status(400).json({ error: "Faltan campos" });
-  await guardarMensaje(telefono, "bot", texto);
+  if (!telefono || !texto) return res.status(400).json({ error:"Faltan campos" });
+  await guardarMensaje(telefono, "bot", texto.replace(/\n/g," "));
   console.log(`🤖 [Bot] ${telefono}: ${texto}`);
-  res.json({ ok: true });
+  res.json({ ok:true });
 });
 
-// ─── CRM envía mensaje manual ─────────────────────────────────
+// ─── CRM: enviar mensaje manual ───────────────────────────────
 app.post("/api/enviar", async (req, res) => {
   const { telefono, mensaje } = req.body;
-  if (!telefono || !mensaje) return res.status(400).json({ error: "Faltan campos" });
-  await enviarMensaje(telefono, mensaje);
-  await guardarMensaje(telefono, "user", mensaje);
-  console.log(`📤 [CRM] ${telefono}: ${mensaje}`);
-  res.json({ ok: true });
+  if (!telefono || !mensaje) return res.status(400).json({ error:"Faltan campos" });
+  try {
+    await enviarMensaje(telefono, mensaje);
+    // NO guardar aquí — el webhook de Meta lo guardará, o ya lo hizo el CRM
+    // Solo guardamos con flag para evitar duplicado
+    await guardarMensaje(telefono, "user", mensaje);
+    console.log(`📤 [CRM] ${telefono}: ${mensaje}`);
+    res.json({ ok:true });
+  } catch(e) {
+    res.status(500).json({ error:e.message });
+  }
 });
 
-// ─── DEBOUNCE simplificado ─────────────────────────────────────
+// ─── N8N: verificar si bot está activo ────────────────────────
+// N8N llama esto ANTES de procesar con IA
+app.get("/api/bot-activo/:telefono", async (req, res) => {
+  const { telefono } = req.params;
+  try {
+    const snap = await db.collection("conversaciones").doc(telefono).get();
+    if (!snap.exists) return res.json({ botActivo:true }); // nuevo cliente = bot activo
+    const botActivo = snap.data().botActivo !== false; // default true
+    res.json({ botActivo });
+  } catch(e) {
+    res.json({ botActivo:true }); // en caso de error, dejar pasar
+  }
+});
+
+// ─── DEBOUNCE ─────────────────────────────────────────────────
 app.post("/api/debounce", async (req, res) => {
   const { telefono, timestamp } = req.body;
-  if (!telefono || !timestamp) return res.status(400).json({ error: "Faltan campos" });
-  await db.collection("debounce").doc(telefono).set({ timestamp, updatedAt: Date.now() });
-  res.json({ ok: true, timestamp });
+  if (!telefono || !timestamp) return res.status(400).json({ error:"Faltan campos" });
+  await db.collection("debounce").doc(telefono).set({ timestamp, updatedAt:Date.now() });
+  res.json({ ok:true, timestamp });
 });
 
 app.get("/api/debounce/:telefono/:timestamp", async (req, res) => {
   const { telefono, timestamp } = req.params;
-  const doc = await db.collection("debounce").doc(telefono).get();
-  if (!doc.exists) return res.json({ esUltimo: false });
-  const esUltimo = doc.data().timestamp === timestamp;
-  res.json({ esUltimo });
+  const snap = await db.collection("debounce").doc(telefono).get();
+  if (!snap.exists) return res.json({ esUltimo:false });
+  res.json({ esUltimo: snap.data().timestamp === timestamp });
 });
 
-// ─── GET combos activos (para N8N → AI Agent) ─────────────────
+// ─── GET combos activos ───────────────────────────────────────
 app.get("/api/combos", async (req, res) => {
   try {
-    const snapshot = await db.collection("combos").where("activo", "==", true).get();
+    const snapshot = await db.collection("combos").where("activo","==",true).get();
     if (snapshot.empty) {
-      // Fallback al catálogo estático si Firebase está vacío
       const { getCombosActivos } = require("./catalogo");
-      return res.json({ combos: getCombosActivos() });
+      return res.json({ combos:getCombosActivos() });
     }
-    const combos = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-    res.json({ combos });
-  } catch (error) {
-    console.error("❌ Error obteniendo combos:", error.message);
+    res.json({ combos: snapshot.docs.map(d => ({ id:d.id, ...d.data() })) });
+  } catch(e) {
     const { getCombosActivos } = require("./catalogo");
-    res.json({ combos: getCombosActivos() });
+    res.json({ combos:getCombosActivos() });
   }
 });
 
 // ─── Modo bot/humano ──────────────────────────────────────────
 app.post("/api/modo", async (req, res) => {
   const { telefono, humano } = req.body;
-  if (!telefono) return res.status(400).json({ error: "Falta telefono" });
-  await db.collection("conversaciones").doc(telefono).set({ botActivo: !humano }, { merge: true });
-  res.json({ ok: true, telefono, modo: humano ? "humano" : "bot" });
+  if (!telefono) return res.status(400).json({ error:"Falta telefono" });
+  await db.collection("conversaciones").doc(telefono).set({ botActivo:!humano }, { merge:true });
+  res.json({ ok:true, modo: humano?"humano":"bot" });
 });
 
-app.listen(PORT, () => {
-  console.log(`🚀 DND Boutique Backend corriendo en puerto ${PORT}`);
-});
+app.listen(PORT, () => console.log(`🚀 DND Boutique Backend en puerto ${PORT}`));
