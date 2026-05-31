@@ -1,6 +1,7 @@
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
+const axios = require("axios");
 const { enviarMensaje, marcarLeido } = require("./whatsapp");
 const { initializeApp, cert } = require("firebase-admin/app");
 const { getFirestore } = require("firebase-admin/firestore");
@@ -108,8 +109,21 @@ app.post("/api/enviar", async (req, res) => {
     console.log(`📤 [CRM] Iniciando envío manual a ${telefono}...`);
     const respuestaMeta = await enviarMensaje(telefono, mensaje);
     await guardarMensaje(telefono, "user", mensaje);
+    
+    // --- AVISO A N8N PARA FILTRADO MANUAL ---
+    try {
+      await axios.post("https://n8n-production-9ae2.up.railway.app/webhook-test/crm-manual", {
+        isManual: true,
+        telefono: telefono,
+        mensaje: mensaje
+      });
+      console.log("✅ [CRM] Aviso enviado a n8n correctamente.");
+    } catch (n8nError) {
+      console.error("⚠️ [CRM] Error al avisar a n8n (no crítico):", n8nError.message);
+    }
+    // ----------------------------------------
+
     console.log(`✅ [CRM] Mensaje enviado correctamente a ${telefono}.`);
-    // Enviamos "isManual: true" para que n8n pueda filtrar esta respuesta y no intentar procesar metadatos inexistentes
     res.json({ ok: true, metaResponse: respuestaMeta, isManual: true });
   } catch(e) {
     console.error("❌ [CRM] Error fatal en enviarMensaje:", e.message);
