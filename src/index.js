@@ -23,14 +23,58 @@ app.use(express.json());
 
 const ahora = () => new Date().toLocaleTimeString("es-SV", { hour:"2-digit", minute:"2-digit" });
 
+// ─── ACTUALIZAR ESTADO MENSAJE ────────────────────────────────
+const actualizarEstadoMensaje = async (telefono, messageId, status) => {
+  try {
+    const ref = db.collection("conversaciones").doc(telefono);
+    const snap = await ref.get();
+    if (!snap.exists) return;
+    const data = snap.data();
+    let changed = false;
+    const mensajes = (data.mensajes || []).map(m => {
+      if (m.id === messageId) {
+        const statusWeight = { "sent": 1, "delivered": 2, "read": 3 };
+        if (!m.status || (statusWeight[status] > (statusWeight[m.status] || 0))) {
+          m.status = status;
+          changed = true;
+        }
+      }
+      return m;
+    });
+    if (changed) {
+      await ref.update({ mensajes });
+    }
+  } catch (e) {
+    console.error("❌ Error actualizando estado:", e.message);
+  }
+};
+
 // ─── GUARDAR MENSAJE ──────────────────────────────────────────
-const guardarMensaje = async (telefono, from, texto, nombre="") => {
+const guardarMensaje = async (telefono, from, texto, nombre="", messageId="") => {
   try {
     const ref = db.collection("conversaciones").doc(telefono);
     const snap = await ref.get();
     const data = snap.exists ? snap.data() : {};
     const mensajes = data.mensajes || [];
-    mensajes.push({ from, texto, tiempo: ahora() });
+
+    // EVITAR DUPLICADOS AL FUSIONAR FRONTEND Y BACKEND:
+    const ultimoMsg = mensajes[mensajes.length - 1];
+    if (ultimoMsg && ultimoMsg.from === from && ultimoMsg.texto === texto) {
+      ultimoMsg.id = messageId || ultimoMsg.id || "";
+      ultimoMsg.status = ultimoMsg.status || "sent";
+      if (!ultimoMsg.timestamp) ultimoMsg.timestamp = Date.now();
+      console.log("⚠️ [Backend] Mensaje optimista ya creado por el CRM. Vinculando ID de Meta.");
+    } else {
+      mensajes.push({
+        from,
+        texto, // Preservamos los saltos de línea sin alterarlos
+        tiempo: ahora(),
+        timestamp: Date.now(),
+        id: messageId,
+        status: "sent"
+      });
+    }
+
     const mensajesLimitados = mensajes.slice(-100);
     await ref.set({
       nombre: nombre || data.nombre || telefono,
@@ -62,6 +106,17 @@ app.post("/webhook", async (req, res) => {
   for (const entry of body.entry || []) {
     for (const change of entry.changes || []) {
       const value = change.value;
+
+      // CAPTURAR ESTADOS DE ENTREGA (SENT, DELIVERED, READ)
+      if (value?.statuses?.length) {
+        for (const statusObj of value.statuses) {
+          const telefono = statusObj.recipient_id;
+          const status = statusObj.status;
+          const messageId = statusObj.id;
+          await actualizarEstadoMensaje(telefono, messageId, status);
+        }
+      }
+
       if (!value?.messages?.length) continue;
       for (const message of value.messages) {
         if (message.type !== "text") continue;
@@ -84,7 +139,7 @@ app.post("/webhook", async (req, res) => {
 app.post("/api/mensaje-entrante", async (req, res) => {
   const { from, nombre, texto } = req.body;
   if (!from || !texto) return res.status(400).json({ error:"Faltan campos" });
-  await guardarMensaje(from, "client", texto.replace(/\n/g," ").replace(/\r/g," "), nombre);
+  await guardarMensaje(from, "client", texto, nombre); // Removido el replace para respetar saltos de línea
   console.log(`📩 [N8N] ${nombre||from}: ${texto}`);
   res.json({ ok:true });
 });
@@ -93,7 +148,7 @@ app.post("/api/mensaje-entrante", async (req, res) => {
 app.post("/api/mensaje-bot", async (req, res) => {
   const { telefono, texto } = req.body;
   if (!telefono || !texto) return res.status(400).json({ error:"Faltan campos" });
-  await guardarMensaje(telefono, "bot", texto.replace(/\n/g," "));
+  await guardarMensaje(telefono, "bot", texto); // Removido el replace para respetar saltos de línea
   console.log(`🤖 [Bot] ${telefono}: ${texto}`);
   res.json({ ok:true });
 });
@@ -108,7 +163,8 @@ app.post("/api/enviar", async (req, res) => {
   try {
     console.log(`📤 [CRM] Iniciando envío manual a ${telefono}...`);
     const respuestaMeta = await enviarMensaje(telefono, mensaje);
-    await guardarMensaje(telefono, "user", mensaje);
+    const messageId = respuestaMeta?.messages?.[0]?.id || "";
+    await guardarMensaje(telefono, "user", mensaje, "", messageId);
     
     // --- AVISO A N8N PARA FILTRADO MANUAL ---
     try {
