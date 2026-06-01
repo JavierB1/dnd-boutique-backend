@@ -33,7 +33,7 @@ const actualizarEstadoMensaje = async (telefono, messageId, status) => {
     let changed = false;
     const mensajes = (data.mensajes || []).map(m => {
       if (m.id === messageId) {
-        const statusWeight = { "sent": 1, "delivered": 2, "read": 3 };
+        const statusWeight = { "failed": 99, "sent": 1, "delivered": 2, "read": 3 };
         if (!m.status || (statusWeight[status] > (statusWeight[m.status] || 0))) {
           m.status = status;
           changed = true;
@@ -50,29 +50,44 @@ const actualizarEstadoMensaje = async (telefono, messageId, status) => {
 };
 
 // ─── GUARDAR MENSAJE ──────────────────────────────────────────
-const guardarMensaje = async (telefono, from, texto, nombre="", messageId="") => {
+const guardarMensaje = async (telefono, from, texto, nombre="", messageId="", clientMsgId="") => {
   try {
     const ref = db.collection("conversaciones").doc(telefono);
     const snap = await ref.get();
     const data = snap.exists ? snap.data() : {};
     const mensajes = data.mensajes || [];
 
-    // EVITAR DUPLICADOS AL FUSIONAR FRONTEND Y BACKEND:
-    const ultimoMsg = mensajes[mensajes.length - 1];
-    if (ultimoMsg && ultimoMsg.from === from && ultimoMsg.texto === texto) {
-      ultimoMsg.id = messageId || ultimoMsg.id || "";
-      ultimoMsg.status = ultimoMsg.status || "sent";
-      if (!ultimoMsg.timestamp) ultimoMsg.timestamp = Date.now();
-      console.log("⚠️ [Backend] Mensaje optimista ya creado por el CRM. Vinculando ID de Meta.");
-    } else {
-      mensajes.push({
-        from,
-        texto, // Preservamos los saltos de línea sin alterarlos
-        tiempo: ahora(),
-        timestamp: Date.now(),
-        id: messageId,
-        status: "sent"
-      });
+    // EVITAR DUPLICADOS USANDO EL CLIENT MSG ID O EL ÚLTIMO TEXTO
+    let editado = false;
+    if (clientMsgId) {
+      const msgExistente = mensajes.find(m => m.clientMsgId === clientMsgId);
+      if (msgExistente) {
+        msgExistente.id = messageId || msgExistente.id || "";
+        msgExistente.status = msgExistente.status || "sent";
+        if (!msgExistente.timestamp) msgExistente.timestamp = Date.now();
+        editado = true;
+        console.log("⚠️ [Backend] Mensaje optimista localizado por clientMsgId. Vinculando ID de Meta.");
+      }
+    }
+
+    if (!editado) {
+      const ultimoMsg = mensajes[mensajes.length - 1];
+      if (ultimoMsg && ultimoMsg.from === from && ultimoMsg.texto === texto) {
+        ultimoMsg.id = messageId || ultimoMsg.id || "";
+        ultimoMsg.status = ultimoMsg.status || "sent";
+        if (!ultimoMsg.timestamp) ultimoMsg.timestamp = Date.now();
+        console.log("⚠️ [Backend] Mensaje optimista localizado por texto coincidente. Vinculando ID de Meta.");
+      } else {
+        mensajes.push({
+          from,
+          texto, // Preservamos los saltos de línea sin alterarlos
+          tiempo: ahora(),
+          timestamp: Date.now(),
+          id: messageId,
+          clientMsgId,
+          status: "sent"
+        });
+      }
     }
 
     const mensajesLimitados = mensajes.slice(-100);
@@ -155,7 +170,7 @@ app.post("/api/mensaje-bot", async (req, res) => {
 
 // ─── CRM: enviar mensaje manual ───────────────────────────────
 app.post("/api/enviar", async (req, res) => {
-  const { telefono, mensaje } = req.body;
+  const { telefono, mensaje, clientMsgId } = req.body;
   if (!telefono || !mensaje) {
     console.error("❌ [CRM] Intento de envío fallido: Faltan campos", { telefono, mensaje });
     return res.status(400).json({ error: "Faltan campos" });
@@ -164,7 +179,7 @@ app.post("/api/enviar", async (req, res) => {
     console.log(`📤 [CRM] Iniciando envío manual a ${telefono}...`);
     const respuestaMeta = await enviarMensaje(telefono, mensaje);
     const messageId = respuestaMeta?.messages?.[0]?.id || "";
-    await guardarMensaje(telefono, "user", mensaje, "", messageId);
+    await guardarMensaje(telefono, "user", mensaje, "", messageId, clientMsgId);
     
     // --- AVISO A N8N PARA FILTRADO MANUAL ---
     try {
