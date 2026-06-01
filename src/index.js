@@ -23,7 +23,7 @@ app.use(express.json());
 
 const ahora = () => new Date().toLocaleTimeString("es-SV", { hour:"2-digit", minute:"2-digit" });
 
-// ─── ACTUALIZAR ESTADO MENSAJE ────────────────────────────────
+// ─── ACTUALIZAR ESTADO MENSAJE (CON PREVENCIÓN DE CONDICIÓN DE CARRERA) ───
 const actualizarEstadoMensaje = async (telefono, messageId, status) => {
   try {
     const ref = db.collection("conversaciones").doc(telefono);
@@ -31,6 +31,8 @@ const actualizarEstadoMensaje = async (telefono, messageId, status) => {
     if (!snap.exists) return;
     const data = snap.data();
     let changed = false;
+
+    // Actualizar el mensaje si ya está en la base de datos
     const mensajes = (data.mensajes || []).map(m => {
       if (m.id === messageId) {
         const statusWeight = { "failed": 99, "sent": 1, "delivered": 2, "read": 3 };
@@ -41,32 +43,51 @@ const actualizarEstadoMensaje = async (telefono, messageId, status) => {
       }
       return m;
     });
+
     if (changed) {
       await ref.update({ mensajes });
+      console.log(`✓ Estado actualizado dinámicamente en DB para ${messageId}: ${status}`);
+    } else {
+      // Si el mensaje aún no tiene su ID mapeado (carrera de datos), guardamos el estado de forma diferida
+      const statusUpdates = data.statusUpdates || {};
+      const statusWeight = { "failed": 99, "sent": 1, "delivered": 2, "read": 3 };
+      const currentStoredStatus = statusUpdates[messageId];
+      if (!currentStoredStatus || (statusWeight[status] > (statusWeight[currentStoredStatus] || 0))) {
+        statusUpdates[messageId] = status;
+        await ref.update({ statusUpdates });
+        console.log(`⏳ Estado diferido guardado para ${messageId}: ${status}`);
+      }
     }
   } catch (e) {
     console.error("❌ Error actualizando estado:", e.message);
   }
 };
 
-// ─── GUARDAR MENSAJE ──────────────────────────────────────────
+// ─── GUARDAR MENSAJE (ACOPLADO CON DESCONGESTIÓN DE DUPLICADOS) ───────────────
 const guardarMensaje = async (telefono, from, texto, nombre="", messageId="", clientMsgId="") => {
   try {
     const ref = db.collection("conversaciones").doc(telefono);
     const snap = await ref.get();
     const data = snap.exists ? snap.data() : {};
     const mensajes = data.mensajes || [];
+    const statusUpdates = data.statusUpdates || {};
 
-    // EVITAR DUPLICADOS USANDO EL CLIENT MSG ID O EL ÚLTIMO TEXTO
+    // Verificar si un estado de Meta ya llegó por webhook de forma anticipada
+    let targetStatus = "sent";
+    if (messageId && statusUpdates[messageId]) {
+      targetStatus = statusUpdates[messageId];
+      delete statusUpdates[messageId]; // Limpieza de memoria
+    }
+
     let editado = false;
     if (clientMsgId) {
       const msgExistente = mensajes.find(m => m.clientMsgId === clientMsgId);
       if (msgExistente) {
         msgExistente.id = messageId || msgExistente.id || "";
-        msgExistente.status = msgExistente.status || "sent";
+        msgExistente.status = targetStatus;
         if (!msgExistente.timestamp) msgExistente.timestamp = Date.now();
         editado = true;
-        console.log("⚠️ [Backend] Mensaje optimista localizado por clientMsgId. Vinculando ID de Meta.");
+        console.log(`⚠️ [Backend] Mensaje optimista localizado por clientMsgId. Vinculando ID de Meta y aplicando estado: ${targetStatus}`);
       }
     }
 
@@ -74,9 +95,9 @@ const guardarMensaje = async (telefono, from, texto, nombre="", messageId="", cl
       const ultimoMsg = mensajes[mensajes.length - 1];
       if (ultimoMsg && ultimoMsg.from === from && ultimoMsg.texto === texto) {
         ultimoMsg.id = messageId || ultimoMsg.id || "";
-        ultimoMsg.status = ultimoMsg.status || "sent";
+        ultimoMsg.status = targetStatus;
         if (!ultimoMsg.timestamp) ultimoMsg.timestamp = Date.now();
-        console.log("⚠️ [Backend] Mensaje optimista localizado por texto coincidente. Vinculando ID de Meta.");
+        console.log(`⚠️ [Backend] Mensaje optimista localizado por texto coincidente. Vinculando ID de Meta y aplicando estado: ${targetStatus}`);
       } else {
         mensajes.push({
           from,
@@ -85,7 +106,7 @@ const guardarMensaje = async (telefono, from, texto, nombre="", messageId="", cl
           timestamp: Date.now(),
           id: messageId,
           clientMsgId,
-          status: "sent"
+          status: targetStatus
         });
       }
     }
@@ -98,6 +119,7 @@ const guardarMensaje = async (telefono, from, texto, nombre="", messageId="", cl
       ultimoTiempo: ahora(),
       botActivo: data.botActivo !== undefined ? data.botActivo : true,
       sinLeer: from === "client" ? (data.sinLeer || 0) + 1 : (data.sinLeer || 0),
+      statusUpdates
     }, { merge: true });
   } catch (e) {
     console.error("❌ Error guardando:", e.message);
